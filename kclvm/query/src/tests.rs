@@ -3,6 +3,7 @@ use std::{fs, path::PathBuf};
 use super::{r#override::apply_override_on_module, *};
 use crate::{path::parse_attribute_path, selector::list_variables};
 use kclvm_ast::ast;
+use kclvm_error::{DiagnosticId, ErrorKind, Level};
 use kclvm_parser::parse_file_force_errors;
 use pretty_assertions::assert_eq;
 
@@ -39,25 +40,28 @@ fn test_override_file_simple() {
     let simple_path = get_test_dir("simple.k".to_string());
     let simple_bk_path = get_test_dir("simple.bk.k".to_string());
     let except_path = get_test_dir("except.k".to_string());
+    fs::copy(simple_bk_path.clone(), simple_path.clone()).unwrap();
     if simple_path.exists() {
         fs::remove_file(simple_path.clone()).unwrap();
     }
 
-    fs::copy(simple_bk_path, simple_path.clone()).unwrap();
+    fs::copy(simple_bk_path.clone(), simple_path.clone()).unwrap();
 
     let import_paths = vec![];
     assert_eq!(
-        override_file(simple_path.to_str().unwrap(), &specs, &import_paths).unwrap(),
+        override_file(simple_path.clone().to_str().unwrap(), &specs, &import_paths).unwrap(),
         true
     );
 
-    let simple_content = fs::read_to_string(simple_path).unwrap();
+    let simple_content = fs::read_to_string(simple_path.clone()).unwrap();
     let expect_content = fs::read_to_string(except_path).unwrap();
 
     let simple_content = simple_content.replace("\r\n", "").replace("\n", "");
     let expect_content = expect_content.replace("\r\n", "").replace("\n", "");
 
     assert_eq!(simple_content, expect_content);
+
+    fs::copy(simple_bk_path.clone(), simple_path.clone()).unwrap();
 }
 /// Test override_file result.
 #[test]
@@ -359,12 +363,9 @@ fn test_list_variables() {
     for (spec, expected, expected_name, op_sym) in test_cases {
         let specs = vec![spec.to_string()];
         let result = list_variables(file.clone(), specs).unwrap();
-        assert_eq!(result.select_result.get(spec).unwrap().value, expected);
-        assert_eq!(
-            result.select_result.get(spec).unwrap().type_name,
-            expected_name
-        );
-        assert_eq!(result.select_result.get(spec).unwrap().op_sym, op_sym);
+        assert_eq!(result.variables.get(spec).unwrap().value, expected);
+        assert_eq!(result.variables.get(spec).unwrap().type_name, expected_name);
+        assert_eq!(result.variables.get(spec).unwrap().op_sym, op_sym);
     }
 }
 
@@ -437,12 +438,10 @@ fn test_list_all_variables() {
 
     for (spec, expected, expected_name, op_sym) in test_cases {
         let result = list_variables(file.clone(), vec![]).unwrap();
-        assert_eq!(result.select_result.get(spec).unwrap().value, expected);
-        assert_eq!(
-            result.select_result.get(spec).unwrap().type_name,
-            expected_name
-        );
-        assert_eq!(result.select_result.get(spec).unwrap().op_sym, op_sym);
+        assert_eq!(result.variables.get(spec).unwrap().value, expected);
+        assert_eq!(result.variables.get(spec).unwrap().type_name, expected_name);
+        assert_eq!(result.variables.get(spec).unwrap().op_sym, op_sym);
+        assert_eq!(result.parse_errors.len(), 0);
     }
 }
 
@@ -453,6 +452,8 @@ fn test_list_unsupported_variables() {
         .unwrap()
         .display()
         .to_string();
+
+    // test unsupport code
     let test_cases = vec![
         ("list", "[_x for _x in range(20) if _x % 2 == 0]"),
         ("list1", "[i if i > 2 else i + 1 for i in [1, 2, 3]]"),
@@ -476,8 +477,31 @@ fn test_list_unsupported_variables() {
     for (spec, expected_code) in test_cases {
         let specs = vec![spec.to_string()];
         let result = list_variables(file.clone(), specs).unwrap();
-        assert_eq!(result.select_result.get(spec), None);
+        assert_eq!(result.variables.get(spec), None);
         assert_eq!(result.unsupported[0].code, expected_code);
+        assert_eq!(result.parse_errors.len(), 0);
+    }
+
+    // test list variables from unsupported code
+    let test_cases = vec![
+        ("if_schema.name", r#""name""#),
+        ("if_schema.age", "1"),
+        ("if_schema.inner", r#"IfSchemaInner {innerValue: 1}"#),
+        ("if_schema.inner.innerValue", "1"),
+        ("if_schema.inner2", r#"{innerValue: 2}"#),
+        ("if_schema.inner2.innerValue", "2"),
+        ("if_schema1.name", r#""name""#),
+        ("if_schema1.age", "1"),
+        ("if_schema1.inner", r#"IfSchemaInner {innerValue: 1}"#),
+        ("if_schema1.inner.innerValue", "1"),
+        ("if_schema1.inner2", r#"{innerValue: 2}"#),
+        ("if_schema1.inner2.innerValue", "2"),
+    ];
+
+    for (spec, expected_code) in test_cases {
+        let specs = vec![spec.to_string()];
+        let result = list_variables(file.clone(), specs).unwrap();
+        assert_eq!(result.variables.get(spec).unwrap().value, expected_code);
     }
 }
 
@@ -498,18 +522,27 @@ fn test_overridefile_insert() {
     booltest = True
 }"#
         .to_string(),
+        r#"_access4=test.ServiceAccess {
+    iType = "kkkkkkk"
+    sType = dsType
+    TestStr = ["${test_str}"]
+    ports = [80, 443]
+    booltest = True
+}"#
+        .to_string(),
         r#"_access.iType="kkkkkkk""#.to_string(),
         r#"_access5.iType="dddddd""#.to_string(),
         r#"a=b"#.to_string(),
         r#"_access6      ="a6""#.to_string(),
         r#"_access.mergedattr=1"#.to_string(),
+        r#"_access.a.b.c=2"#.to_string(),
+        r#"_access.a.c.b=3"#.to_string(),
     ];
 
     let simple_path = get_test_dir("test_override_file/main.k".to_string());
     let simple_bk_path = get_test_dir("test_override_file/main.bk.k".to_string());
     let except_path = get_test_dir("test_override_file/expect.k".to_string());
     fs::copy(simple_bk_path.clone(), simple_path.clone()).unwrap();
-
     let import_paths = vec![
         "base.pkg.kusion_models.app".to_string(),
         "base.pkg.kusion_models.app.vip as vip".to_string(),
@@ -519,17 +552,73 @@ fn test_overridefile_insert() {
         ".values".to_string(),
     ];
 
-    assert_eq!(
-        override_file(&simple_path.display().to_string(), &specs, &import_paths).unwrap(),
-        true
-    );
+    // test insert multiple times
+    for _ in 1..=5 {
+        assert_eq!(
+            override_file(&simple_path.display().to_string(), &specs, &import_paths).unwrap(),
+            true
+        );
 
-    let simple_content = fs::read_to_string(simple_path.clone()).unwrap();
-    let expect_content = fs::read_to_string(except_path.clone()).unwrap();
+        let simple_content = fs::read_to_string(simple_path.clone()).unwrap();
+        let expect_content = fs::read_to_string(except_path.clone()).unwrap();
 
-    let simple_content = simple_content.replace("\r\n", "").replace("\n", "");
-    let expect_content = expect_content.replace("\r\n", "").replace("\n", "");
+        let simple_content = simple_content.replace("\r\n", "").replace("\n", "");
+        let expect_content = expect_content.replace("\r\n", "").replace("\n", "");
 
-    assert_eq!(simple_content, expect_content);
+        assert_eq!(simple_content, expect_content);
+    }
+
     fs::copy(simple_bk_path.clone(), simple_path.clone()).unwrap();
+}
+
+#[test]
+fn test_list_variable_with_invalid_kcl() {
+    let file = PathBuf::from("./src/test_data/test_list_variables/invalid.k")
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+    let specs = vec!["a".to_string()];
+    let result = list_variables(file.clone(), specs).unwrap();
+    assert_eq!(result.variables.get("a"), None);
+    assert_eq!(result.parse_errors.len(), 1);
+    assert_eq!(result.parse_errors[0].level, Level::Error);
+    assert_eq!(
+        result.parse_errors[0].code,
+        Some(DiagnosticId::Error(ErrorKind::InvalidSyntax))
+    );
+    assert_eq!(
+        result.parse_errors[0].messages[0].message,
+        "unexpected token ':'"
+    );
+    assert_eq!(result.parse_errors[0].messages[0].range.0.filename, file);
+    assert_eq!(result.parse_errors[0].messages[0].range.0.line, 1);
+    assert_eq!(result.parse_errors[0].messages[0].range.0.column, Some(3));
+}
+
+#[test]
+fn test_list_variables_with_file_noexist() {
+    let file = PathBuf::from("./src/test_data/test_list_variables/noexist.k")
+        .display()
+        .to_string();
+    let specs = vec!["a".to_string()];
+    let result = list_variables(file.clone(), specs);
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert_eq!(err.to_string(), "Cannot find the kcl file, please check the file path ./src/test_data/test_list_variables/noexist.k");
+}
+
+#[test]
+fn test_override_file_with_invalid_spec() {
+    let specs = vec!["....".to_string()];
+    let import_paths = vec![];
+    let file = PathBuf::from("./src/test_data/test_override_file/main.k")
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+    let result = override_file(&file, &specs, &import_paths);
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert_eq!(err.to_string(), "Invalid spec format '....', expected <pkgpath>:<field_path>=<filed_value> or <pkgpath>:<field_path>-");
 }

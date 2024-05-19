@@ -176,9 +176,9 @@ impl KclvmServiceImpl {
     /// assert_eq!(result.type_errors.len(), 0);
     /// assert_eq!(result.symbols.len(), 12);
     /// assert_eq!(result.scopes.len(), 3);
-    /// assert_eq!(result.node_symbol_map.len(), 176);
-    /// assert_eq!(result.symbol_node_map.len(), 176);
-    /// assert_eq!(result.fully_qualified_name_map.len(), 185);
+    /// assert_eq!(result.node_symbol_map.len(), 177);
+    /// assert_eq!(result.symbol_node_map.len(), 177);
+    /// assert_eq!(result.fully_qualified_name_map.len(), 186);
     /// assert_eq!(result.pkg_scope_map.len(), 3);
     /// ```
     #[inline]
@@ -347,7 +347,7 @@ impl KclvmServiceImpl {
         let select_res = list_variables(k_file, specs)?;
 
         let variables: HashMap<String, Variable> = select_res
-            .select_result
+            .variables
             .iter()
             .map(|(key, var)| {
                 (
@@ -370,6 +370,11 @@ impl KclvmServiceImpl {
         return Ok(ListVariablesResult {
             variables,
             unsupported_codes,
+            parse_errors: select_res
+                .parse_errors
+                .into_iter()
+                .map(|e| e.into_error())
+                .collect(),
         });
     }
 
